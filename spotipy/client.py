@@ -6,6 +6,7 @@ __all__ = ["Spotify", "SpotifyException"]
 
 import json
 import logging
+import re
 import warnings
 
 import requests
@@ -13,6 +14,8 @@ import six
 import urllib3
 
 from spotipy.exceptions import SpotifyException
+
+from collections import defaultdict
 
 logger = logging.getLogger(__name__)
 
@@ -95,6 +98,29 @@ class Spotify(object):
         "GB",
         "US",
         "UY"]
+
+    # Spotify URI scheme defined in [1], and the ID format as base-62 in [2].
+    #
+    # Unfortunately the IANA specification is out of date and doesn't include the new types
+    # show and episode. Additionally, for the user URI, it does not specify which characters
+    # are valid for usernames, so the assumption is alphanumeric which coincidentially are also
+    # the same ones base-62 uses.
+    # In limited manual exploration this seems to hold true, as newly accounts are assigned an
+    # identifier that looks like the base-62 of all other IDs, but some older accounts only have
+    # numbers and even older ones seemed to have been allowed to freely pick this name.
+    #
+    # [1] https://www.iana.org/assignments/uri-schemes/prov/spotify
+    # [2] https://developer.spotify.com/documentation/web-api/#spotify-uris-and-ids
+    _regex_spotify_uri = r'^spotify:(?:(?P<type>track|artist|album|playlist|show|episode|audiobook):(?P<id>[0-9A-Za-z]+)|user:(?P<username>[0-9A-Za-z]+):playlist:(?P<playlistid>[0-9A-Za-z]+))$'  # noqa: E501
+
+    # Spotify URLs are defined at [1]. The assumption is made that they are all
+    # pointing to open.spotify.com, so a regex is used to parse them as well,
+    # instead of a more complex URL parsing function.
+    #
+    # [1] https://developer.spotify.com/documentation/web-api/#spotify-uris-and-ids
+    _regex_spotify_url = r'^(http[s]?:\/\/)?open.spotify.com\/(?P<type>track|artist|album|playlist|show|episode|user|audiobook)\/(?P<id>[0-9A-Za-z]+)(\?.*)?$'  # noqa: E501
+
+    _regex_base62 = r'^[0-9A-Za-z]+$'
 
     def __init__(
         self,
@@ -570,12 +596,12 @@ class Spotify(object):
                       official documentation https://developer.spotify.com/documentation/web-api/reference/search/)  # noqa
                 - limit  - the number of items to return (min = 1, default = 10, max = 50). If a search is to be done on multiple
                             markets, then this limit is applied to each market. (e.g. search US, CA, MX each with a limit of 10).
+                            If multiple types are specified, this applies to each type.
                 - offset - the index of the first item to return
                 - type - the types of items to return. One or more of 'artist', 'album',
                          'track', 'playlist', 'show', or 'episode'. If multiple types are desired, pass in a comma separated string.
                 - markets - A list of ISO 3166-1 alpha-2 country codes. Search all country markets by default.
-                - total - the total number of results to return if multiple markets are supplied in the search.
-                          If multiple types are specified, this only applies to the first type.
+                - total - the total number of results to return across multiple markets and types.
         """
         warnings.warn(
             "Searching multiple markets is an experimental feature. "
@@ -1758,7 +1784,7 @@ class Spotify(object):
     ):
         """ Start or resume user's playback.
 
-            Provide a `context_uri` to start playback or an album,
+            Provide a `context_uri` to start playback of an album,
             artist, or playlist.
 
             Provide a `uris` list to start playback of one or more
@@ -1940,20 +1966,28 @@ class Spotify(object):
         return path
 
     def _get_id(self, type, id):
-        fields = id.split(":")
-        if len(fields) >= 3:
-            if type != fields[-2]:
-                logger.warning('Expected id of type %s but found type %s %s',
-                               type, fields[-2], id)
-            return fields[-1].split("?")[0]
-        fields = id.split("/")
-        if len(fields) >= 3:
-            itype = fields[-2]
-            if type != itype:
-                logger.warning('Expected id of type %s but found type %s %s',
-                               type, itype, id)
-            return fields[-1].split("?")[0]
-        return id
+        uri_match = re.search(Spotify._regex_spotify_uri, id)
+        if uri_match is not None:
+            uri_match_groups = uri_match.groupdict()
+            if uri_match_groups['type'] != type:
+                # TODO change to a ValueError in v3
+                raise SpotifyException(400, -1, "Unexpected Spotify URI type.")
+            return uri_match_groups['id']
+
+        url_match = re.search(Spotify._regex_spotify_url, id)
+        if url_match is not None:
+            url_match_groups = url_match.groupdict()
+            if url_match_groups['type'] != type:
+                raise SpotifyException(400, -1, "Unexpected Spotify URL type.")
+            # TODO change to a ValueError in v3
+            return url_match_groups['id']
+
+        # Raw identifiers might be passed, ensure they are also base-62
+        if re.search(Spotify._regex_base62, id) is not None:
+            return id
+
+        # TODO change to a ValueError in v3
+        raise SpotifyException(400, -1, "Unsupported URL / URI.")
 
     def _get_uri(self, type, id):
         if self._is_uri(id):
@@ -1962,7 +1996,7 @@ class Spotify(object):
             return "spotify:" + type + ":" + self._get_id(type, id)
 
     def _is_uri(self, uri):
-        return uri.startswith("spotify:") and len(uri.split(':')) == 3
+        return re.search(Spotify._regex_spotify_uri, uri) is not None
 
     def _search_multiple_markets(self, q, limit, offset, type, markets, total):
         if total and limit > total:
@@ -1973,22 +2007,77 @@ class Spotify(object):
                 UserWarning,
             )
 
-        results = {}
-        first_type = type.split(",")[0] + 's'
+        results = defaultdict(dict)
+        item_types = [item_type + "s" for item_type in type.split(",")]
         count = 0
 
         for country in markets:
             result = self._get(
                 "search", q=q, limit=limit, offset=offset, type=type, market=country
             )
-            results[country] = result
+            for item_type in item_types:
+                results[country][item_type] = result[item_type]
 
-            count += len(result[first_type]['items'])
+                # Truncate the items list to the current limit
+                if len(results[country][item_type]['items']) > limit:
+                    results[country][item_type]['items'] = \
+                        results[country][item_type]['items'][:limit]
+
+                count += len(results[country][item_type]['items'])
+                if total and limit > total - count:
+                    # when approaching `total` results, adjust `limit` to not request more
+                    # items than needed
+                    limit = total - count
+
             if total and count >= total:
-                break
-            if total and limit > total - count:
-                # when approaching `total` results, adjust `limit` to not request more
-                # items than needed
-                limit = total - count
+                return results
 
         return results
+
+    def get_audiobook(self, id, market=None):
+        """ Get Spotify catalog information for a single audiobook identified by its unique
+        Spotify ID.
+
+        Parameters:
+        - id - the Spotify ID for the audiobook
+        - market - an ISO 3166-1 alpha-2 country code.
+        """
+        audiobook_id = self._get_id("audiobook", id)
+        endpoint = f"audiobooks/{audiobook_id}"
+
+        if market:
+            endpoint += f'?market={market}'
+
+        return self._get(endpoint)
+
+    def get_audiobooks(self, ids, market=None):
+        """ Get Spotify catalog information for multiple audiobooks based on their Spotify IDs.
+
+        Parameters:
+        - ids - a list of Spotify IDs for the audiobooks
+        - market - an ISO 3166-1 alpha-2 country code.
+        """
+        audiobook_ids = [self._get_id("audiobook", id) for id in ids]
+        endpoint = f"audiobooks?ids={','.join(audiobook_ids)}"
+
+        if market:
+            endpoint += f'&market={market}'
+
+        return self._get(endpoint)
+
+    def get_audiobook_chapters(self, id, market=None, limit=20, offset=0):
+        """ Get Spotify catalog information about an audiobook’s chapters.
+
+        Parameters:
+        - id - the Spotify ID for the audiobook
+        - market - an ISO 3166-1 alpha-2 country code.
+        - limit - the maximum number of items to return
+        - offset - the index of the first item to return
+        """
+        audiobook_id = self._get_id("audiobook", id)
+        endpoint = f"audiobooks/{audiobook_id}/chapters?limit={limit}&offset={offset}"
+
+        if market:
+            endpoint += f'&market={market}'
+
+        return self._get(endpoint)

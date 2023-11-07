@@ -7,9 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
-// Add new changes below this line
--   Modified docstring for playlist_add_items() to accept "only URIs or URLs",
-    with intended deprecation for IDs in v3
+### Added
+
+- Added support for audiobook endpoints: get_audiobook, get_audiobooks, and get_audiobook_chapters.
+- Added integration tests for audiobook endpoints.
+- Removed `python 2.7` from GitHub Actions CI workflow. Python v2.7 reached end of life support and is no longer supported by Ubuntu 20.04.
+- Removed `python 3.6` from GitHub Actions CI workflow. Ubuntu 20.04 is not available in GitHub Actions for `python 3.6`.
+
+### Changed
+- Changes the YouTube video link for authentication tutorial (the old video was in low definition, the new one is in high definition)
+- Updated links to Spotify in documentation 
+
+## [2.23.0] - 2023-04-07
+
+### Added
+- Added optional `encoder_cls` argument to `CacheFileHandler`, which overwrite default encoder for token before writing to disk
+- Integration tests for searching multiple types in multiple markets (non-user endpoints)
+- Publish to PyPI action
+
+### Fixed
+- Fixed the regex for matching playlist URIs with the format spotify:user:USERNAME:playlist:PLAYLISTID.
+- `search_markets` now factors the counts of all types in the `total`  rather than just the first type ([#534](https://github.com/spotipy-dev/spotipy/issues/534))
+
+## [2.22.1] - 2023-01-23
 
 ### Added
 
@@ -17,11 +37,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added Comment to README - Getting Started for user to add URI to app in Spotify Developer Dashboard. 
 - Added playlist_add_tracks.py to example folder
 
+### Changed
+
+- Modified docstring for playlist_add_items() to accept "only URIs or URLs",
+  with intended deprecation for IDs in v3
+
 ### Fixed
 
+- Path traversal vulnerability that may lead to type confusion in URI handling code
 - Update contributing.md
-
-### Removed
 
 ## [2.22.0] - 2022-12-10
 
@@ -383,6 +407,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fix typos in doc
 - Start following [SemVer](https://semver.org) properly
 
+### Changed
+
+- Made instructions in the CONTRIBUTING.md file more clear such that it is easier to onboard and there are no conflicts with TUTORIAL.md
 ## [2.5.0] - 2020-01-11
 
 Added follow and player endpoints
